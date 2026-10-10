@@ -1,78 +1,95 @@
 # Mine Nav Rover
-### GPS-Denied Autonomous Ground Rover for Mine-Environment Reconnaissance and Hazard Sensing
+### GPS-Denied Autonomous Rover for Perception, Localization, and Navigation
 
-Mine Nav Rover is a mobile robotics project focused on rover navigation and environmental sensing in GPS-denied environments. The platform combines onboard vision, wheel-motion sensing, inertial heading/orientation data, and an experimental electronic-nose (e-nose) gas-sensor array. The software is organized to separate high-level processing on the Raspberry Pi from embedded sensor and motor-control functions.
+Mine Nav Rover is a modular autonomous ground-rover project designed for GPS-denied environments. Its architecture combines camera-based perception, magnetic-field sensing, a gas-sensor e-nose array, mmWave radar, FPGA-based wheel-encoder odometry, and the **currently integrated 2D LiDAR**. ROS 2 connects the data-fusion/localization, SLAM, YOLO perception, Nav2 navigation, and GUI layers shown in the project architecture.
 
-> **Project status:** This repository is a development scaffold. Some components are under integration or evaluation, and planned sensors are identified separately below. Do not interpret the listed sensors as validated mine-detection capability.
+> **Status note:** This README follows the supplied architecture diagram. Document each feature as operational only after validating it on the rover.
 
-## Project goals
+## System architecture
 
-- Explore rover navigation in environments where GPS may be unavailable or unreliable.
-- Capture camera data for future computer-vision and perception pipelines.
-- Estimate rover movement using wheel encoders and inertial/magnetic sensing.
-- Evaluate an array of gas sensors for changes in volatile-gas signatures.
-- Keep motor control, sensor acquisition, and high-level computing modular.
-- Provide a path for future ranging sensors and improved autonomy.
+```mermaid
+flowchart TD
+    CAM["CAMERA NODE<br/>Raspberry Pi 5 + Camera"]
+    MAG["MINE DETECTION NODE<br/>HMC5883L"]
+    GAS["NARCOTICS / EXPLOSIVE DETECTION NODE<br/>mmWave Radar + Gas E-Nose Array"]
+    ODOM["ODOMETRY NODE using FPGA<br/>Wheel Encoder + 2D LiDAR"]
+    COMM["LOCAL Wi-Fi / USB COMMUNICATION"]
+    FUSION["DATA FUSION / LOCALIZATION"]
+    ROS["ROS 2"]
+    PROC["PROCESSING<br/>Laptop + Raspberry Pi"]
+    SLAM["SLAM"]
+    YOLO["YOLO"]
+    NAV["Nav2"]
+    GUI["DISPLAY / GUI<br/>Map + Camera, Pose + Objects, Navigation Path"]
+    MOTOR["MOTOR DRIVERS<br/>L298N Dual H-Bridge Module"]
 
-## System overview
-
-```text
-                       ┌────────────────────────────┐
-                       │       USB Webcam           │
-                       └─────────────┬──────────────┘
-                                     │ USB
-                                     ▼
-┌────────────────────────────────────────────────────────────────┐
-│ Raspberry Pi                                                   │
-│ OpenCV camera pipeline • high-level logic • logging/telemetry  │
-└───────────────────────────┬────────────────────────────────────┘
-                            │ USB serial / defined interface
-              ┌─────────────┴─────────────────┐
-              ▼                               ▼
-┌──────────────────────────┐     ┌──────────────────────────────┐
-│ Embedded sensor subsystem│     │ Motor-control subsystem      │
-│ e-nose sensor array      │     │ Shrike FI (planned/current    │
-│ e.g. Arduino Nano during │     │ integration target) or ESP32 │
-│ bench testing            │     │ reference implementation     │
-└──────────────────────────┘     └──────────────┬───────────────┘
-                                                │
-                                     Motor driver and motors
-                                                │
-                                  Wheel encoders / odometry data
+    CAM -->|"MJPEG stream + Flask"| COMM
+    MAG --> COMM
+    GAS --> COMM
+    ODOM -->|"Odometry + Heading"| COMM
+    ODOM --> MOTOR
+    COMM --> FUSION --> ROS --> PROC
+    PROC --> SLAM --> GUI
+    PROC --> YOLO --> GUI
+    PROC --> NAV --> GUI
+    NAV -->|"Navigation feedback / motor commands"| ODOM
 ```
 
-The diagram is a logical overview, not a final wiring schematic. Exact interfaces depend on the controller configuration used on the rover. If Shrike FI is the deployed motor/encoder controller, the ESP32 example in this repository is only a reference and must not be assumed to control Shrike FI.
+The flowchart represents the system's logical data flow. Confirm actual node names, ROS 2 topics, message formats, and hardware interfaces in the implementation documentation.
 
-## Sensors and hardware
+## Hardware and sensing nodes
 
-### Current / experimental sensing
+### Camera node — Raspberry Pi 5 + camera
+- Captures the rover's visual scene.
+- Sends video through an MJPEG stream served by Flask, as shown in the architecture.
+- Supplies images to the YOLO perception pipeline.
+- `src/opencv_camera.py` is a basic camera test utility; it is not the full Flask streaming or YOLO node.
 
-| Component | Role | Notes |
-|---|---|---|
-| USB webcam (720p/1080p class) | Image capture for OpenCV and future visual perception | Camera index and resolution are configurable. Validate lighting, frame rate, and image quality on the rover. |
-| Wheel encoders | Wheel rotation and odometry input | Useful for estimating displacement and supporting dead reckoning; errors accumulate with wheel slip and uneven terrain. |
-| IMU | Angular-rate and acceleration measurements | Supports motion estimation and orientation filtering. Exact part number and interface should be recorded in the hardware BOM. |
-| Magnetometer | Magnetic-field measurements for heading estimation | Susceptible to interference from motors, wiring, steel structures, and nearby magnetic materials; calibrate in the assembled rover. |
-| E-nose gas-sensor array | Experimental detection of changes in gas/VOC response patterns | Bench setup uses five gas sensors; MQ-2 and MQ-3 have been used in testing. Record the exact models of the remaining sensors before claiming specific gas coverage. |
-| Arduino Nano (e-nose bench prototype) | Reads the analog gas-sensor outputs during experiments | A practical way to sample multiple analog sensors. Confirm voltage levels and ADC range before connecting to another controller. |
+### Mine-detection node — HMC5883L
+- The HMC5883L three-axis magnetometer measures the local magnetic field.
+- Can support experiments involving magnetic-field anomalies.
+- A magnetometer alone cannot confirm a mine or identify an object. Readings depend on distance, orientation, calibration, and interference from motors, wiring, and nearby metal. This is an experimental sensing node, not certified mine-detection equipment.
 
-**E-nose limitations:** MQ-series sensors are broad-response metal-oxide gas sensors, not selective chemical identifiers. Their readings vary with warm-up time, humidity, temperature, sensor age, and calibration. Perfume and hand sanitizer can be useful repeatable test stimuli for early bench checks, but a response to them does not establish detection of explosives, narcotics, or mines. Treat readings as experimental signals and validate with controlled procedures.
+### Narcotics / explosive detection node — mmWave radar + gas e-nose array
+- Combines data from a mmWave radar and a multi-sensor gas array for experimental sensing.
+- The e-nose prototype has used five gas sensors, including MQ-2 and MQ-3. Record the exact models of the remaining sensors in the hardware bill of materials.
+- Gas-sensor responses vary with warm-up time, humidity, temperature, airflow, contamination, and sensor age.
+- Perfume and hand sanitizer may be used as early bench-test stimuli, but responses to them do not demonstrate narcotics or explosive detection.
+- Do not claim reliable identification of narcotics, explosives, or concealed packages without validated hardware, processing, and controlled test results.
 
-### Motor and computing hardware
+### Odometry node — FPGA, wheel encoders + 2D LiDAR
+- The FPGA-based odometry node interfaces with wheel encoders and the **2D LiDAR already used on the rover**.
+- Wheel encoders provide wheel-rotation measurements for odometry and dead-reckoning estimates.
+- 2D LiDAR provides range scans for obstacle perception and can support mapping/SLAM when the driver and ROS 2 integration are configured.
+- Odometry and heading are sent through local Wi-Fi/USB communication to the data-fusion/localization layer.
+- The diagram shows a control/feedback path between Nav2 and the odometry/motor-control subsystem. Verify the exact interface and firmware against the deployed hardware.
 
-| Component | Role | Notes |
-|---|---|---|
-| Raspberry Pi | Main computer for OpenCV, high-level logic, and data logging | Runs Python tools in this repository. |
-| Vicharak Shrike FI FPGA board | Intended low-level motor/encoder and related sensor-control subsystem | Confirm the exact firmware, pin mapping, and communication protocol used by the project. |
-| ESP32 | Optional/reference motor-control or wireless manual-override path | The included example firmware is for a generic dual H-bridge and is not a drop-in Shrike FI driver. |
-| Dual motor driver and DC motors | Physical rover locomotion | Driver, motor voltage/current, and pin assignments must match the actual hardware. |
+### Motor-driver subsystem
+- The architecture identifies an L298N dual H-bridge motor-driver module.
+- The controller sends motor commands through the deployed motor-control interface.
+- Check motor voltage/current requirements, driver thermal limits, wiring, and controller logic compatibility before operation.
 
-### Planned / future sensing
+## Software architecture
 
-| Component | Intended use | Status / caveat |
-|---|---|---|
-| 2D LiDAR | Range scans for obstacle detection and mapping/SLAM experiments | **Integrated on the rover.** Software integration and validation status should be documented separately. |
-| 64 GHz mmWave sensor | Investigate presence/motion or concealed-object-related sensing | Exploratory only. Capabilities depend on the exact sensor and signal-processing method; do not claim it can identify narcotics or reliably identify concealed packages without validated evidence. |
+| Component | Role in the architecture |
+|---|---|
+| Raspberry Pi 5 | Camera capture/streaming and onboard computing |
+| Laptop + Raspberry Pi | Processing and running system nodes, depending on deployment |
+| OpenCV | Camera capture and image-processing foundation |
+| Flask + MJPEG | Camera streaming interface |
+| HMC5883L interface | Magnetic-field measurements for experimental anomaly sensing |
+| Gas e-nose interface | Acquisition/logging of multi-sensor gas responses |
+| mmWave interface | Acquisition of radar data from the selected sensor |
+| FPGA firmware | Encoder acquisition and odometry/control interface |
+| Local Wi-Fi / USB | Inter-node data communication |
+| Data fusion / localization | Combines available sensor and motion information |
+| ROS 2 | Middleware connecting processing and robotics nodes |
+| SLAM | Mapping and localization using configured sensor inputs |
+| YOLO | Visual object detection |
+| Nav2 | ROS 2 navigation planning and control |
+| Display / GUI | Map, camera, pose/object results, and navigation path |
+
+The starter scripts in this repository do **not** implement the entire flowchart. The OpenCV preview and ESP32 serial teleoperation code are utilities/examples, not replacements for the Flask stream, FPGA firmware, sensor drivers, data fusion, SLAM, YOLO, Nav2, or GUI.
 
 ## Repository structure
 
@@ -89,26 +106,18 @@ The diagram is a logical overview, not a final wiring schematic. Exact interface
     └── esp32_motor_control.ino
 ```
 
-## Software stack
+The ESP32 motor-control sketch is a generic reference implementation. If the deployed motor and encoder controller is the FPGA board, do not assume the ESP32 sketch can control it without a compatible hardware interface and protocol.
 
-- **Python 3** — high-level scripts and serial communication
-- **OpenCV** — camera capture and image-processing foundation
-- **pySerial** — USB serial communication with embedded controllers
-- **Arduino IDE / C++** — example ESP32 firmware
-- **Raspberry Pi OS** — target high-level computing platform
+## Setup: OpenCV camera utility
 
-ROS 2, Nav2, visual SLAM, LiDAR mapping, sensor fusion, and autonomous route planning may be added as separate integration milestones; they are not implemented by the starter scripts alone.
-
-## Setup on Raspberry Pi
-
-Recommended system packages:
+On Raspberry Pi OS:
 
 ```bash
 sudo apt update
 sudo apt install -y python3-opencv python3-serial
 ```
 
-Alternatively, create a virtual environment:
+Or use a virtual environment:
 
 ```bash
 python3 -m venv .venv --system-site-packages
@@ -116,90 +125,55 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Find the USB serial port:
-
-```bash
-ls /dev/ttyUSB* /dev/ttyACM*
-```
-
-The device name may differ. Close other programs using the serial port before starting the control script.
-
-## Run the OpenCV camera preview
+Run the camera preview:
 
 ```bash
 python3 src/opencv_camera.py --camera 0
 ```
 
-Press `q` or `Esc` to exit. The script captures frames, shows a live preview, and displays approximate FPS. It is a camera smoke test—not object detection, mine detection, obstacle avoidance, or autonomous navigation.
+Press `q` or `Esc` to exit. This utility checks camera access and displays approximate FPS; it does not run YOLO or publish a ROS 2 image topic.
 
-## Run the ESP32 motor-control example
+## ESP32 reference teleoperation
 
-1. Check the ESP32 and motor-driver pin map in `firmware/esp32_motor_control.ino`.
-2. Flash the firmware using Arduino IDE.
-3. Lift the rover so the wheels cannot touch the ground.
-4. Keep a physical motor-power cutoff accessible.
-5. Start at low speed:
+Use this only if the ESP32 example matches your actual hardware setup.
+
+1. Verify the GPIO pin map in `firmware/esp32_motor_control.ino`.
+2. Flash it to a compatible ESP32.
+3. Lift the wheels off the ground and keep a physical motor-power cutoff available.
+4. Start slowly:
 
 ```bash
 python3 src/esp_motor_control.py --port /dev/ttyUSB0 --speed 80
 ```
 
-Keyboard commands:
+Keys: `W` forward, `S` reverse, `A` left, `D` right, `X` or Space stop, `Q` quit.
 
-| Key | Command |
-|---|---|
-| `W` | Forward |
-| `S` | Reverse |
-| `A` | Turn left in place |
-| `D` | Turn right in place |
-| `X` or Space | Stop |
-| `Q` | Quit and send stop |
+## Integration checklist
 
-Change `/dev/ttyUSB0` to the correct port for your device. On Windows, a port such as `COM5` may be used.
+- [ ] Record exact mmWave radar model and data interface.
+- [ ] Record all five e-nose sensor models, output types, warm-up requirements, and calibration steps.
+- [ ] Document FPGA board/firmware version, encoder pinout, counts per revolution, and wheel geometry.
+- [ ] Document the installed 2D LiDAR model, driver, scan interface/topic, mounting, and test results.
+- [ ] Define ROS 2 topics/message types for camera frames, LiDAR scans, odometry, heading, and sensor readings.
+- [ ] Validate timestamps and data-fusion assumptions.
+- [ ] Record SLAM package/configuration and sensor inputs.
+- [ ] Record YOLO model, classes, and evaluation results.
+- [ ] Record Nav2 configuration, localization source, costmaps, and emergency-stop behavior.
+- [ ] Test manual override, communication-loss timeout, and physical emergency stop.
 
-## Serial protocol used by the ESP32 example
+## Safety and validation
 
-Commands are newline-terminated ASCII:
-
-- `M,left,right` — wheel commands from `-255` to `255`
-- `STOP` — stop both motors
-
-Examples:
-
-```text
-M,100,100
-M,-80,80
-STOP
-```
-
-The example firmware has a 500 ms command timeout. It uses a generic dual H-bridge mapping and Arduino-ESP32 core 2.x LEDC APIs; changes may be required for different motor drivers, GPIO assignments, or Arduino-ESP32 core versions.
-
-## Sensor integration checklist
-
-- [ ] Record exact part numbers for all five e-nose sensors and add them to the hardware BOM.
-- [ ] Document analog/digital output, operating voltage, heater current, warm-up time, and calibration procedure for each gas sensor.
-- [ ] Verify ADC voltage compatibility before connecting sensor outputs to a controller.
-- [ ] Log raw readings with timestamps, sensor warm-up state, and ambient conditions.
-- [ ] Calibrate the IMU and magnetometer after installing them on the rover.
-- [ ] Verify encoder polarity, counts per revolution, wheel diameter, and wheel separation.
-- [ ] Define a documented message format between the embedded controller and Raspberry Pi.
-- [ ] Test motor direction, emergency stop, and communication-loss behavior with wheels lifted.
-- [ ] Document the integrated 2D LiDAR model, interface, mounting, scan topic/protocol, and validation results.
-- [ ] Treat mmWave sensing as planned/experimental until hardware and software validation are complete.
-
-## Safety and responsible use
-
-- This project is a robotics and sensing prototype, not certified mine-detection or explosive-detection equipment.
-- Do not use it to declare an area safe, locate live mines, or replace trained professionals and approved equipment.
-- Never connect motors directly to controller GPIO pins. Use a properly rated motor driver and power source.
-- Keep the electronics and motor power arrangement within each board/driver's specifications; establish common ground where required.
-- Validate fail-safe stopping, physical emergency stop, wiring, and thermal/current limits before ground testing.
-- Do not operate the rover unattended based on the included preview or teleoperation scripts.
+- This is a research rover, not certified mine, narcotics, or explosive detection equipment.
+- Never use experimental sensor readings to declare an area safe or replace trained personnel and approved procedures.
+- Test motor commands with wheels lifted before ground operation.
+- Never connect motors directly to controller GPIO pins.
+- Verify power, grounding, current, thermal, and logic-voltage requirements for all boards and sensors.
+- Implement and test fail-safe stopping before autonomous operation.
 
 ## Contributing
 
-Contributions should document the hardware revision, exact sensor models, wiring/interface changes, software dependencies, and test conditions. Keep experimental results separate from validated capabilities.
+For each added module, document the hardware revision, interface, dependencies, calibration, ROS 2 topics/messages where applicable, and test evidence. Clearly distinguish implemented features from planned or experimental capabilities.
 
 ## License
 
-Add the license selected for your project before publishing or accepting external contributions.
+Choose and add a license before accepting external contributions or publishing the repository for reuse.
